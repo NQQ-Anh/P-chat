@@ -22,17 +22,12 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 import static com.chat.platform.api.ApiModels.RoomUnreadCount;
 import static com.chat.platform.api.ApiModels.DirectUnreadCount;
+import org.springframework.web.bind.annotation.PathVariable;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -153,6 +148,46 @@ public class ChatController {
     public List<MessageInfo> directHistory(@PathVariable String conversationId,
                                            HttpServletRequest request) {
         return chat.directHistory(conversationId, username(request));
+    }
+
+    @PostMapping("/direct-conversations/{conversationId}/messages/{messageId}/recall")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void recallDirectMessage(
+            @PathVariable String conversationId,
+            @PathVariable long messageId,
+            HttpServletRequest request) {
+
+        String username = username(request);
+
+        // Kiểm tra quyền và thu hồi tin nhắn trong database
+        chat.recallDirectMessage(conversationId, messageId, username);
+
+        // Gửi thông báo đến hai người tham gia cuộc trò chuyện
+        webSocket.broadcastDirectMessageRecalled(
+                conversationId,
+                messageId,
+                username
+        );
+    }
+
+    @PostMapping("/rooms/{roomId}/messages/{messageId}/recall")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void recallRoomMessage(
+            @PathVariable String roomId,
+            @PathVariable long messageId,
+            HttpServletRequest request) {
+
+        String username = username(request);
+
+        // Kiểm tra quyền và thu hồi tin nhắn trong database
+        chat.recallRoomMessage(roomId, messageId, username);
+
+        // Gửi thông báo đến tất cả thành viên nhóm đang online
+        webSocket.broadcastRoomMessageRecalled(
+                roomId,
+                messageId,
+                username
+        );
     }
 
     @PostMapping("/rooms")

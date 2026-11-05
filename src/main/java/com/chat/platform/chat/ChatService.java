@@ -130,6 +130,7 @@ public class ChatService {
         requireDirectParticipant(conversationId, username);
         List<MessageInfo> messages = jdbc.query("""
         SELECT m.message_id, m.sender_username, m.content, m.created_at,
+               m.recalled,
                f.file_id, f.original_name, f.content_type
         FROM direct_messages m
         LEFT JOIN chat_files f ON f.file_id = m.file_id
@@ -147,7 +148,8 @@ public class ChatService {
                     row.getString("file_id"),
                     row.getString("original_name"),
                     row.getString("content_type"),
-                    directReaders(id)
+                    directReaders(id),
+                    row.getBoolean("recalled")
             );
         }, conversationId, HISTORY_LIMIT);
         java.util.Collections.reverse(messages);
@@ -268,7 +270,8 @@ public class ChatService {
                 fileId,
                 fileName,
                 contentType,
-                List.of(username)
+                List.of(username),
+                false
         );
     }
 
@@ -469,19 +472,110 @@ public class ChatService {
                 }, roomId);
     }
 
+    @Transactional
+    public void recallRoomMessage(String roomId, long messageId, String username) {
+        requireMember(roomId, username);
+
+        List<String> senders = jdbc.query("""
+            SELECT sender_username
+            FROM messages
+            WHERE message_id = ? AND room_id = ?
+            """,
+                (row, index) -> row.getString("sender_username"),
+                messageId, roomId
+        );
+
+        if (senders.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Message not found in this room."
+            );
+        }
+
+        if (!senders.get(0).equals(username)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "You can only recall your own messages."
+            );
+        }
+
+        jdbc.update("""
+            UPDATE messages
+            SET recalled = TRUE,
+                content = '',
+                file_id = NULL
+            WHERE message_id = ? AND room_id = ?
+            """, messageId, roomId);
+    }
+
+    @Transactional
+    public void recallDirectMessage(
+            String conversationId,
+            long messageId,
+            String username) {
+
+        requireDirectParticipant(conversationId, username);
+
+        List<String> senders = jdbc.query("""
+            SELECT sender_username
+            FROM direct_messages
+            WHERE message_id = ? AND conversation_id = ?
+            """,
+                (row, index) -> row.getString("sender_username"),
+                messageId, conversationId
+        );
+
+        if (senders.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Message not found in this conversation."
+            );
+        }
+
+        if (!senders.get(0).equals(username)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "You can only recall your own messages."
+            );
+        }
+
+        jdbc.update("""
+            UPDATE direct_messages
+            SET recalled = TRUE,
+                content = '',
+                file_id = NULL
+            WHERE message_id = ? AND conversation_id = ?
+            """, messageId, conversationId);
+    }
+
     public List<MessageInfo> history(String roomId, String username) {
         requireMember(roomId, username);
+
         List<MessageInfo> messages = jdbc.query("""
-                SELECT m.message_id, m.room_id, m.sender_username, m.content, m.created_at,
-                       f.file_id, f.original_name, f.content_type
-                FROM messages m LEFT JOIN chat_files f ON f.file_id = m.file_id
-                WHERE m.room_id = ? ORDER BY m.message_id DESC LIMIT ?
-                """, (row, index) -> {
+            SELECT m.message_id, m.room_id, m.sender_username, m.content, m.created_at,
+                   m.recalled,
+                   f.file_id, f.original_name, f.content_type
+            FROM messages m
+            LEFT JOIN chat_files f ON f.file_id = m.file_id
+            WHERE m.room_id = ?
+            ORDER BY m.message_id DESC LIMIT ?
+            """, (row, index) -> {
             long id = row.getLong("message_id");
-            return new MessageInfo(id, row.getString("room_id"), row.getString("sender_username"),
-                    row.getString("content"), row.getLong("created_at"), row.getString("file_id"),
-                    row.getString("original_name"), row.getString("content_type"), readers(id));
+
+            return new MessageInfo(
+                    id,
+                    row.getString("room_id"),
+                    row.getString("sender_username"),
+                    row.getString("content"),
+                    row.getLong("created_at"),
+                    row.getString("file_id"),
+                    row.getString("original_name"),
+                    row.getString("content_type"),
+                    readers(id),
+                    row.getBoolean("recalled")
+            );
         }, roomId, HISTORY_LIMIT);
+
         java.util.Collections.reverse(messages);
         return messages;
     }
@@ -640,7 +734,7 @@ public class ChatService {
             contentType = fileInfo[1];
         }
         return new MessageInfo(id, roomId, sender, content, timestamp, fileId, name, contentType,
-                List.of(sender));
+                List.of(sender), false);
     }
 
     private List<String> readers(long messageId) {
@@ -658,7 +752,7 @@ public class ChatService {
     private MessageInfo directMessage(long id, String conversationId, String sender,
                                       String content, long timestamp) {
         return new MessageInfo(id, conversationId, sender, content, timestamp,
-                null, null, null, directReaders(id));
+                null, null, null, directReaders(id), false);
     }
 
     private DirectConversationInfo directConversation(String conversationId, String otherUsername) {

@@ -40,7 +40,8 @@ public final class ApiModels {
 
     public record MessageInfo(long messageId, String roomId, String sender, String content,
                               long timestamp, String fileId, String fileName,
-                              String contentType, List<String> readBy) {
+                              String contentType, List<String> readBy, boolean recalled
+    ) {
     }
 
     public record FileInfo(String fileId, String name, String contentType) {

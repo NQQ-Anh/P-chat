@@ -114,6 +114,42 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 ));
     }
 
+    public void broadcastRoomMessageRecalled(
+            String roomId,
+            long messageId,
+            String username) {
+
+        Set<String> activeMembers = Set.copyOf(
+                chat.activeMemberUsernames(roomId)
+        );
+
+        notifyRoomMembers(
+                activeMembers,
+                Map.of(
+                        "type", "message_recalled",
+                        "roomId", roomId,
+                        "messageId", messageId,
+                        "username", username
+                )
+        );
+    }
+
+    public void broadcastDirectMessageRecalled(
+            String conversationId,
+            long messageId,
+            String username) {
+
+        broadcastDirect(
+                conversationId,
+                Map.of(
+                        "type", "direct_message_recalled",
+                        "conversationId", conversationId,
+                        "messageId", messageId,
+                        "username", username
+                )
+        );
+    }
+
     public void notifyRoomMembers(Set<String> usernames, Map<String, Object> event) {
         for (WebSocketSession recipient : presence.sessionsFor(usernames)) {
             sendSafely(recipient, event);
