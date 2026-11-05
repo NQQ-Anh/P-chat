@@ -12,11 +12,14 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
+import com.chat.platform.api.ApiModels.RoomUnreadCount;
+import com.chat.platform.api.ApiModels.DirectUnreadCount;
 
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
+import java.util.Map;
 
 @Service
 public class ChatService {
@@ -126,12 +129,27 @@ public class ChatService {
     public List<MessageInfo> directHistory(String conversationId, String username) {
         requireDirectParticipant(conversationId, username);
         List<MessageInfo> messages = jdbc.query("""
-                SELECT message_id, sender_username, content, created_at
-                FROM direct_messages
-                WHERE conversation_id = ? ORDER BY message_id DESC LIMIT ?
-                """, (row, index) -> directMessage(row.getLong("message_id"), conversationId,
-                row.getString("sender_username"), row.getString("content"), row.getLong("created_at")),
-                conversationId, HISTORY_LIMIT);
+        SELECT m.message_id, m.sender_username, m.content, m.created_at,
+               f.file_id, f.original_name, f.content_type
+        FROM direct_messages m
+        LEFT JOIN chat_files f ON f.file_id = m.file_id
+        WHERE m.conversation_id = ?
+        ORDER BY m.message_id DESC LIMIT ?
+        """, (row, index) -> {
+            long id = row.getLong("message_id");
+
+            return new MessageInfo(
+                    id,
+                    conversationId,
+                    row.getString("sender_username"),
+                    row.getString("content"),
+                    row.getLong("created_at"),
+                    row.getString("file_id"),
+                    row.getString("original_name"),
+                    row.getString("content_type"),
+                    directReaders(id)
+            );
+        }, conversationId, HISTORY_LIMIT);
         java.util.Collections.reverse(messages);
         return messages;
     }
@@ -171,6 +189,87 @@ public class ChatService {
         jdbc.update("UPDATE direct_conversations SET last_message_at = ? WHERE conversation_id = ?",
                 createdAt, conversationId);
         return directMessage(id.longValue(), conversationId, username, content, createdAt);
+    }
+
+    @Transactional
+    public MessageInfo saveDirectAttachment(
+            String conversationId,
+            String username,
+            String fileId,
+            String fileName,
+            String contentType) {
+
+        requireDirectParticipant(conversationId, username);
+
+        long now = System.currentTimeMillis();
+
+        jdbc.update("""
+            INSERT INTO chat_files
+            (file_id, room_id, conversation_id, uploaded_by,
+             original_name, content_type, storage_name, created_at)
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+            """,
+                fileId, conversationId, username,
+                fileName, contentType, fileId, now);
+
+        Number id;
+
+        if (isPostgreSql()) {
+            id = jdbc.queryForObject("""
+                INSERT INTO direct_messages
+                (conversation_id, sender_username, content, file_id, created_at)
+                VALUES (?, ?, '', ?, ?)
+                RETURNING message_id
+                """,
+                    Long.class, conversationId, username, fileId, now);
+        } else {
+            KeyHolder keyHolder = new GeneratedKeyHolder();
+
+            jdbc.update(connection -> {
+                PreparedStatement statement = connection.prepareStatement("""
+                    INSERT INTO direct_messages
+                    (conversation_id, sender_username, content, file_id, created_at)
+                    VALUES (?, ?, '', ?, ?)
+                    """, Statement.RETURN_GENERATED_KEYS);
+
+                statement.setString(1, conversationId);
+                statement.setString(2, username);
+                statement.setString(3, fileId);
+                statement.setLong(4, now);
+
+                return statement;
+            }, keyHolder);
+
+            id = keyHolder.getKey();
+        }
+
+        if (id == null) {
+            throw new IllegalStateException("Could not create direct attachment message.");
+        }
+
+        jdbc.update("""
+            INSERT INTO direct_message_read_receipts
+            (message_id, username, read_at)
+            VALUES (?, ?, ?)
+            """, id.longValue(), username, now);
+
+        jdbc.update("""
+            UPDATE direct_conversations
+            SET last_message_at = ?
+            WHERE conversation_id = ?
+            """, now, conversationId);
+
+        return new MessageInfo(
+                id.longValue(),
+                conversationId,
+                username,
+                "",
+                now,
+                fileId,
+                fileName,
+                contentType,
+                List.of(username)
+        );
     }
 
     @Transactional
@@ -466,14 +565,34 @@ public class ChatService {
 
     public FileRecord file(String fileId, String username) {
         List<FileRecord> files = jdbc.query("""
-                SELECT file_id, room_id, original_name, content_type, storage_name
-                FROM chat_files WHERE file_id = ?
-                """, (row, index) -> new FileRecord(row.getString("file_id"), row.getString("room_id"),
-                row.getString("original_name"), row.getString("content_type"), row.getString("storage_name")),
+            SELECT file_id, room_id, conversation_id,
+                   original_name, content_type, storage_name
+            FROM chat_files
+            WHERE file_id = ?
+            """,
+                (row, index) -> new FileRecord(
+                        row.getString("file_id"),
+                        row.getString("room_id"),
+                        row.getString("conversation_id"),
+                        row.getString("original_name"),
+                        row.getString("content_type"),
+                        row.getString("storage_name")
+                ),
                 fileId);
+
         FileRecord file = files.stream().findFirst()
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "File not found."));
-        requireMember(file.roomId(), username);
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "File not found."));
+
+        if (file.roomId() != null) {
+            requireMember(file.roomId(), username);
+        } else if (file.conversationId() != null) {
+            requireDirectParticipant(file.conversationId(), username);
+        } else {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN, "File has no valid conversation.");
+        }
+
         return file;
     }
 
@@ -546,6 +665,53 @@ public class ChatService {
         return new DirectConversationInfo(conversationId, otherUsername, presence.isOnline(otherUsername));
     }
 
+    //dem tin nhan chua doc trong nhóm
+    public List<RoomUnreadCount> unreadCountsForRooms(String username) {
+        return jdbc.query("""
+            SELECT m.room_id, COUNT(*) AS unread_count
+            FROM messages m
+            JOIN rooms r ON r.room_id = m.room_id
+            JOIN room_members rm ON rm.room_id = m.room_id
+            LEFT JOIN message_read_receipts rr
+                ON rr.message_id = m.message_id
+                AND rr.username = ?
+            WHERE rm.username = ?
+                AND rm.left_at IS NULL
+                AND r.deleted_at IS NULL
+                AND m.sender_username <> ?
+                AND rr.message_id IS NULL
+            GROUP BY m.room_id
+            """,
+                (row, index) -> new RoomUnreadCount(
+                        row.getString("room_id"),
+                        row.getInt("unread_count")
+                ),
+                username, username, username
+        );
+    }
+
+    public List<DirectUnreadCount> unreadCountsForDirect(String username) {
+        return jdbc.query("""
+            SELECT m.conversation_id, COUNT(*) AS unread_count
+            FROM direct_messages m
+            JOIN direct_conversations dc
+                ON dc.conversation_id = m.conversation_id
+            LEFT JOIN direct_message_read_receipts rr
+                ON rr.message_id = m.message_id
+                AND rr.username = ?
+            WHERE (dc.participant_a = ? OR dc.participant_b = ?)
+                AND m.sender_username <> ?
+                AND rr.message_id IS NULL
+            GROUP BY m.conversation_id
+            """,
+                (row, index) -> new DirectUnreadCount(
+                        row.getString("conversation_id"),
+                        row.getInt("unread_count")
+                ),
+                username, username, username, username
+        );
+    }
+
     private boolean userExists(String username) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM users WHERE username = ?",
                 Integer.class, username);
@@ -557,7 +723,12 @@ public class ChatService {
                 connection -> "PostgreSQL".equals(connection.getMetaData().getDatabaseProductName())));
     }
 
-    public record FileRecord(String fileId, String roomId, String originalName, String contentType,
-                             String storageName) {
+    public record FileRecord(
+            String fileId,
+            String roomId,
+            String conversationId,
+            String originalName,
+            String contentType,
+            String storageName) {
     }
 }

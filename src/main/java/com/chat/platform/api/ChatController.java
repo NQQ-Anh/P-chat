@@ -31,6 +31,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
+import static com.chat.platform.api.ApiModels.RoomUnreadCount;
+import static com.chat.platform.api.ApiModels.DirectUnreadCount;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -74,6 +76,77 @@ public class ChatController {
     public DirectConversationInfo openDirectConversation(@PathVariable String otherUsername,
                                                          HttpServletRequest request) {
         return chat.openDirectConversation(username(request), otherUsername);
+    }
+
+    @GetMapping("/direct-conversations/unread-counts")
+    public List<DirectUnreadCount> directUnreadCounts(
+            HttpServletRequest request
+    ) {
+        return chat.unreadCountsForDirect(username(request));
+    }
+
+    @PostMapping("/direct-conversations/{conversationId}/files")
+    public MessageInfo uploadDirect(
+            @PathVariable String conversationId,
+            @RequestParam("file") MultipartFile upload,
+            HttpServletRequest request) throws IOException {
+
+        String username = username(request);
+
+        chat.requireDirectParticipant(conversationId, username);
+
+        if (upload.isEmpty() || upload.getSize() > MAX_UPLOAD_SIZE) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "File tải lên phải dưới 10MB");
+        }
+
+        String originalName = safeFileName(upload.getOriginalFilename());
+
+        String contentType = upload.getContentType() == null
+                ? MediaType.APPLICATION_OCTET_STREAM_VALUE
+                : upload.getContentType();
+
+        String fileId = UUID.randomUUID().toString();
+
+        Path uploadDirectory = properties.uploadDir()
+                .toAbsolutePath().normalize();
+
+        Files.createDirectories(uploadDirectory);
+
+        Path destination = uploadDirectory.resolve(fileId + ".bin").normalize();
+
+        if (!destination.startsWith(uploadDirectory)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "Invalid file path.");
+        }
+
+        try {
+            upload.transferTo(destination);
+
+            validateImage(destination, contentType);
+
+            MessageInfo saved = chat.saveDirectAttachment(
+                    conversationId,
+                    username,
+                    fileId,
+                    originalName,
+                    contentType
+            );
+
+            webSocket.broadcastDirectMessage(conversationId, saved);
+
+            return saved;
+
+        } catch (RuntimeException | IOException e) {
+            try {
+                Files.deleteIfExists(destination);
+            } catch (IOException cleanupError) {
+                e.addSuppressed(cleanupError);
+            }
+
+            throw e;
+        }
     }
 
     @GetMapping("/direct-conversations/{conversationId}/messages")
@@ -145,6 +218,13 @@ public class ChatController {
     @GetMapping("/rooms/{roomId}/messages")
     public List<MessageInfo> history(@PathVariable String roomId, HttpServletRequest request) {
         return chat.history(roomId, username(request));
+    }
+
+    @GetMapping("/rooms/unread-counts")
+    public List<RoomUnreadCount> roomUnreadCounts(
+            HttpServletRequest request
+    ) {
+        return chat.unreadCountsForRooms(username(request));
     }
 
     @PostMapping("/rooms/{roomId}/files")

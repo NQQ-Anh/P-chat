@@ -45,4 +45,15 @@ public final class ApiModels {
 
     public record FileInfo(String fileId, String name, String contentType) {
     }
+
+    public record RoomUnreadCount(
+            String roomId,
+            long unreadCount
+    ) {}
+
+    public record DirectUnreadCount(
+            String conversationId,
+            long unreadCount
+    ) {}
+
 }
