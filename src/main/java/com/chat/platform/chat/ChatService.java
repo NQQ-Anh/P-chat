@@ -756,7 +756,22 @@ public class ChatService {
     }
 
     private DirectConversationInfo directConversation(String conversationId, String otherUsername) {
-        return new DirectConversationInfo(conversationId, otherUsername, presence.isOnline(otherUsername));
+
+        String displayName = jdbc.query("""
+            SELECT COALESCE(display_name, username)
+            FROM users
+            WHERE username = ?
+            """,
+                (row, index) -> row.getString(1),
+                otherUsername
+        ).stream().findFirst().orElse(otherUsername);
+
+        return new DirectConversationInfo(
+                conversationId,
+                otherUsername,
+                displayName,
+                presence.isOnline(otherUsername)
+        );
     }
 
     //dem tin nhan chua doc trong nhóm
